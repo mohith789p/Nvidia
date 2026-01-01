@@ -1,125 +1,71 @@
 #!/bin/bash
 
-# 🎯 Automated Comparison Runner for Jetson Nano
-# Run this script to execute the full comparison workflow
-# Usage: bash run_comparison.sh
+# 🎯 Jetson Nano Benchmark: Video PRIMARY
+# Priority: test_video.mp4 → /dev/video0 → CSI
+# Usage: bash compare_nano.sh
 
-set -e  # Exit on error
+set -e
 
-echo ""
+clear
 echo "════════════════════════════════════════════════════════════════"
-echo "🎯 Edge AI: Classical GPU vs Jetson Nano Comparison"
-echo "════════════════════════════════════════════════════════════════"
-echo ""
+echo "🎯 Jetson Nano: Video Benchmark"
+echo "Priority: test_video.mp4"
+echo "══════════════════════════════════════════════════════════════=="
 
-# Create results directory
+# Colors
+GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
+
 mkdir -p results
 
-# Check if virtual environment exists
-if [ ! -d "venv_jetson" ]; then
-    echo ""
-    echo "⚠️  Virtual environment not found. Creating..."
-    python3 -m venv venv_jetson
-fi
-
-# Activate virtual environment
-echo "📍 Activating virtual environment..."
+# Virtual env
+[ ! -d venv_jetson ] && python3 -m venv venv_jetson
 source venv_jetson/bin/activate
 
-# Install/upgrade pip
-echo ""
-echo "📥 Upgrading pip..."
-pip install --upgrade pip setuptools wheel
+# Dependencies
+pip install --quiet --upgrade pip ultralytics opencv-python numpy
 
-# Install PyTorch for Jetson (ARM64)
-echo ""
-python3 -c "import torch" 2>/dev/null || {
-    echo "📥 Installing PyTorch for Jetson (ARM)..."
-    # Official NVIDIA PyTorch wheel for Jetson
-    pip install torch torchvision torchaudio
-}
+# Model
+[ ! -f yolov8n.pt ] && python3 -c "from ultralytics import YOLO; YOLO('yolov8n.pt'); echo ✅ Model"
 
-# Install other dependencies
-echo ""
-echo "📥 Installing required packages..."
-pip install -q ultralytics opencv-python numpy
-
-# Check if YOLO model exists
-if [ ! -f "yolov8n.pt" ]; then
-    echo ""
-    echo "📥 Downloading YOLOv8 Nano model..."
-    python3 << 'EOF'
-from ultralytics import YOLO
-model = YOLO("yolov8n.pt")
-print("✅ Model downloaded: yolov8n.pt")
-EOF
-fi
-
-# Create test video if needed
-if [ ! -f "test_video.mp4" ]; then
-    echo ""
-    echo "🎬 Creating test video..."
-    python3 << 'EOF'
-import cv2
-import numpy as np
-
-fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-out = cv2.VideoWriter('test_video.mp4', fourcc, 30.0, (640, 480))
-
-for frame_num in range(300):
-    frame = np.zeros((480, 640, 3), dtype=np.uint8)
-    x = (frame_num * 5) % 640
-    cv2.circle(frame, (x, 240), 30, (0, 255, 0), -1)
-    cv2.putText(frame, f'Frame {frame_num}', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-    out.write(frame)
-
+# PRIORITY 1: Create test video (consistent benchmarking)
+if [ ! -f test_video.mp4 ]; then
+    echo -e "${YELLOW}🎬 Creating test_video.mp4 (priority source)...${NC}"
+    python3 -c "
+import cv2,numpy
+fourcc=cv2.VideoWriter_fourcc(*'mp4v')
+out=cv2.VideoWriter('test_video.mp4',fourcc,30,(640,480))
+for i in range(300):
+    f=numpy.zeros((480,640,3),numpy.uint8)
+    cv2.circle(f,(int(i*2%640),240),30,(0,255,0),-1)
+    out.write(f)
 out.release()
-print("✅ Test video created: test_video.mp4")
-EOF
+print('✅ test_video.mp4 ready - PREFERRED SOURCE')
+"
 fi
 
-echo ""
-echo ""
-echo "════════════════════════════════════════════════════════════════"
-echo "⭐ PHASE 1: CPU Baseline (ARM Processor)"
-echo "════════════════════════════════════════════════════════════════"
-echo ""
-python3 jetson_nano_phase1.py --video test_video.mp4 --duration 30 --model yolov8n.pt
+echo -e "${GREEN}✅ test_video.mp4 ready (PRIMARY SOURCE)${NC}"
+echo "📹 USB fallback ready (/dev/video0)"
 
 echo ""
-echo ""
 echo "════════════════════════════════════════════════════════════════"
-echo "⭐ PHASE 3: GPU Accelerated (with UMA - Zero-Copy)"
+echo "⭐ PHASE 1: CPU (nano_phase1.py)"
 echo "════════════════════════════════════════════════════════════════"
-echo ""
-python3 jetson_nano_phase3_uma.py --video test_video.mp4 --duration 30 --model yolov8n.pt
+python3 nano_phase1.py --duration 20 --model yolov8n.pt
 
 echo ""
-echo ""
 echo "════════════════════════════════════════════════════════════════"
-echo "✅ JETSON NANO BENCHMARKS COMPLETE!"
+echo "⭐ PHASE 3: GPU UMA (nano_phase3.py)"  
 echo "════════════════════════════════════════════════════════════════"
-echo ""
-
-echo "📊 Results saved to:"
-ls -lh results/
+python3 nano_phase3.py --duration 20 --model yolov8n.pt
 
 echo ""
-echo "💡 Next Steps:"
-echo "   1. Transfer Windows results to this machine (scp or SCP)"
-echo "   2. Run visual_dashboard.py on either machine:"
-echo ""
-echo "   python3 visual_dashboard.py \\"
-echo "       --windows /path/to/windows_phase3.json \\"
-echo "       --jetson results/jetson_phase3.json \\"
-echo "       --output comparison_report.html"
-echo ""
-echo "   3. Open comparison_report.html in your browser"
-echo ""
-echo "════════════════════════════════════════════════════════════════"
-echo ""
+echo "${GREEN}✅ COMPLETE! Results:${NC}"
+ls -lh results/*.json
 
-# Deactivate virtual environment
+echo ""
+echo "${YELLOW}💡 Priority used:${NC}"
+echo "1️⃣ test_video.mp4 (always created/used)"
+echo "2️⃣ USB camera /dev/video0 (fallback)"
+echo "3️⃣ CSI camera (last resort)"
+
 deactivate
-
-echo "✅ Script completed successfully!"

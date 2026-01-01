@@ -4,6 +4,7 @@ Platform: Jetson Nano with ARM Processor (Quad-core A57)
 Purpose: Establish CPU-only baseline on edge device
 Key Metrics: FPS, Latency, Thermal Temperature
 Note: ARM CPU is much slower than x86 (expect 0.5-2 FPS vs 3-5 on Windows)
+USB CAMERA FALLBACK: Automatically uses /dev/video0 if test_video.mp4 not found
 """
 
 import cv2
@@ -17,6 +18,7 @@ import platform
 import subprocess
 from datetime import datetime
 from pathlib import Path
+
 
 class JetsonCPUBaseline:
     def __init__(self, model_name="yolov8n.pt", log_file="jetson_phase1_results.json"):
@@ -88,25 +90,65 @@ class JetsonCPUBaseline:
                 self.metrics['temperature'].append(temp)
             time.sleep(0.5)
     
+    def get_video_source(self, video_source="test_video.mp4"):
+        """Triple fallback: Video file → USB Camera → CSI Camera"""
+        print(f"🔍 Searching for video source: {video_source}")
+        
+        # Priority 1: Try video file first (most consistent)
+        cap = cv2.VideoCapture(video_source)
+        if cap.isOpened():
+            print(f"✅ Using test_video.mp4 (synthetic video)")
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            cap.set(cv2.CAP_PROP_FPS, 30)
+            return cap
+        
+        # Priority 2: USB Camera (/dev/video0)
+        print("⚠️ test_video.mp4 not found - trying USB camera...")
+        cap = cv2.VideoCapture(0)  # USB camera index 0
+        if cap.isOpened():
+            print("✅ USB camera found at /dev/video0")
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            cap.set(cv2.CAP_PROP_FPS, 30)
+            print("📹 USB camera configured: 640x480@30fps")
+            return cap
+        
+        # Priority 3: CSI Camera (Jetson default ribbon camera)
+        print("⚠️ No USB camera - trying CSI camera...")
+        csi_pipeline = (
+            "nvarguscamerasrc ! "
+            "video/x-raw(memory:NVMM), width=(int)640, height=(int)480, "
+            "format=(string)NV12, framerate=(fraction)30/1 ! "
+            "nvvidconv ! video/x-raw, format=(string)BGRx ! "
+            "videoconvert ! video/x-raw, format=(string)BGR ! appsink"
+        )
+        cap = cv2.VideoCapture(csi_pipeline, cv2.CAP_GSTREAMER)
+        if cap.isOpened():
+            print("✅ CSI camera found (Jetson default ribbon camera)")
+            return cap
+        
+        # No source found
+        print("❌ NO VIDEO SOURCE FOUND!")
+        print("💡 Solutions:")
+        print("   1. Run: python3 -c \"create test_video.mp4\"")
+        print("   2. Connect USB webcam to /dev/video0")
+        print("   3. Enable CSI camera in Jetson settings")
+        print("   4. Check: ls /dev/video*")
+        return None
+    
     def run_inference(self, video_source="test_video.mp4", duration=30):
         """
         Run inference on Jetson CPU only (GPU not used)
         Purpose: Show ARM CPU performance baseline
         """
-        cap = cv2.VideoCapture(video_source)
+        cap = self.get_video_source(video_source)
+        if cap is None:
+            print("❌ Cannot continue without video source")
+            return
         
-        if not cap.isOpened():
-            print(f"❌ Failed to open video: {video_source}")
-            print("📝 Fallback: Using camera (0)")
-            cap = cv2.VideoCapture(0)
-            if not cap.isOpened():
-                print("❌ Camera also failed. Exiting.")
-                return
-        
-        # Set resolution
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        cap.set(cv2.CAP_PROP_FPS, 30)
+        source_info = "test_video.mp4" if "test_video" in video_source else "USB Camera" if cv2.VideoCapture(0).isOpened() else "CSI Camera"
+        print(f"📹 Source: {source_info}")
         
         # Start monitoring thread
         monitor_thread = threading.Thread(target=self.monitor_system, args=(duration,), daemon=True)
@@ -115,15 +157,15 @@ class JetsonCPUBaseline:
         frame_count = 0
         start_time = time.time()
         
-        print(f"🚀 Starting inference on ARM CPU for {duration} seconds...\n")
+        print(f"\n🚀 Starting inference on ARM CPU for {duration} seconds...\n")
         print(f"{'Frame':<8} {'FPS':<12} {'Latency (ms)':<20} {'Temp (°C)':<15}")
         print("-" * 60)
         
         while (time.time() - start_time) < duration:
             ret, frame = cap.read()
             if not ret:
-                print("⚠️  End of video reached, looping...")
-                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                print("⚠️ End of video/camera stream - looping...")
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0) if source_info == "test_video.mp4" else None
                 continue
             
             # Inference timing
@@ -148,9 +190,9 @@ class JetsonCPUBaseline:
         cap.release()
         monitor_thread.join(timeout=2)
         
-        self._print_results(frame_count, time.time() - start_time)
+        self._print_results(frame_count, time.time() - start_time, source_info)
     
-    def _print_results(self, frame_count, elapsed):
+    def _print_results(self, frame_count, elapsed, source_info):
         """Print comprehensive results and save to JSON"""
         if not self.metrics['latency_list']:
             print("❌ No frames processed")
@@ -161,6 +203,7 @@ class JetsonCPUBaseline:
             'phase': 'Phase 1: CPU Baseline',
             'platform': 'Jetson Nano (ARM Processor)',
             'architecture': 'ARM Cortex-A57 (4 cores)',
+            'video_source': source_info,
             'total_frames': frame_count,
             'duration_seconds': elapsed,
             'fps': {
@@ -196,6 +239,7 @@ class JetsonCPUBaseline:
         print("\n" + "="*70)
         print("📊 JETSON NANO - PHASE 1 RESULTS (CPU BASELINE)")
         print("="*70)
+        print(f"Video Source: {source_info}")
         print(f"Total Frames Processed: {frame_count}")
         print(f"Duration: {elapsed:.2f}s")
         print(f"\n🎥 FPS Metrics:")
@@ -221,6 +265,7 @@ class JetsonCPUBaseline:
         print("="*70 + "\n")
         
         return results
+
 
 if __name__ == "__main__":
     import argparse
